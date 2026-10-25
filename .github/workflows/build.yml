@@ -24,18 +24,23 @@ jobs:
           install: >-
             git
             make
-            mingw-w64-clang-x86_64-clang
+            mingw-w64-clang-x86_64-toolchain
             mingw-w64-clang-x86_64-cmake
+            mingw-w64-clang-x86_64-giflib
+            mingw-w64-clang-x86_64-libjpeg-turbo
 
       - name: Clone libjxl
+        env:
+          REF: ${{ inputs.ref }}
         run: |
           set -e
-          REF="${{ github.event.inputs.ref }}"
-          git clone --recursive https://github.com/libjxl/libjxl.git libjxl
+          git clone https://github.com/libjxl/libjxl.git libjxl
           cd libjxl
           if [ -n "$REF" ]; then
             git checkout "$REF"
           fi
+          # Must run AFTER checkout so submodules match the requested ref.
+          git submodule update --init --recursive
 
       - name: Extract version info
         id: version
@@ -54,16 +59,55 @@ jobs:
       - name: Configure and build
         run: |
           set -e
-          export CFLAGS="-O3"
-          export CXXFLAGS=$CFLAGS
-          export CPPFLAGS=$CFLAGS
-          export LDFLAGS="-static"
           cd libjxl
           mkdir -p build
           cd build
-          cmake .. -G "MSYS Makefiles" -DCMAKE_BUILD_TYPE=Release -DJPEGXL_ENABLE_MANPAGES=OFF -DJPEGXL_ENABLE_DOXYGEN=OFF -DJPEGXL_STATIC=ON -DJPEGXL_BUNDLE_LIBPNG=OFF -DJPEGXL_ENABLE_BENCHMARK=OFF -DJPEGXL_ENABLE_OPENEXR=OFF -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=OFF -DJPEGXL_ENABLE_SJPEG=OFF -DCMAKE_CXX_FLAGS="-static -O3"
-          make -j$(nproc)
-          strip --strip-all build/tools/*.exe
+          # Notes:
+          # - JPEGXL_STATIC=ON already adds -static to the exe linker flags.
+          # - Release already implies -O3.
+          # - No -march=native: the CI runner's CPU is not yours. Highway picks
+          #   the best enabled SIMD target at runtime instead.
+          # - HWY: AVX3_DL is what an i5-11400 uses; AVX2/SSE4 are fallbacks
+          #   (SSE2 is the x86-64 baseline and cannot be disabled). AVX3 stays
+          #   ON because libjxl only enables the AVX-512 fast-lossless encoder
+          #   path when it is on. EMU128/SCALAR are dropped to save size.
+          cmake .. -G "MSYS Makefiles" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DJPEGXL_STATIC=ON \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DBUILD_TESTING=OFF \
+            -DJPEGXL_BUNDLE_LIBPNG=ON \
+            -DJPEGXL_ENABLE_MANPAGES=OFF \
+            -DJPEGXL_ENABLE_DOXYGEN=OFF \
+            -DJPEGXL_ENABLE_BENCHMARK=OFF \
+            -DJPEGXL_ENABLE_OPENEXR=OFF \
+            -DJPEGXL_ENABLE_SJPEG=OFF \
+            -DJPEGXL_ENABLE_HWY_AVX2=ON \
+            -DJPEGXL_ENABLE_HWY_AVX3=ON \
+            -DJPEGXL_ENABLE_HWY_AVX3_DL=ON \
+            -DJPEGXL_ENABLE_HWY_AVX3_SPR=OFF \
+            -DJPEGXL_ENABLE_HWY_AVX3_ZEN4=OFF \
+            -DJPEGXL_ENABLE_HWY_SSE4=ON \
+            -DJPEGXL_ENABLE_HWY_SSSE3=OFF \
+            -DJPEGXL_ENABLE_HWY_EMU128=OFF \
+            -DJPEGXL_ENABLE_HWY_SCALAR=OFF
+          make -j"$(nproc)"
+          # Path is relative to build/, not libjxl/build/build/.
+          llvm-strip --strip-all tools/*.exe
+
+      - name: Verify binaries are self-contained
+        run: |
+          set -e
+          cd libjxl/build/tools
+          for f in *.exe; do
+            if ldd "$f" | grep -qi '/clang64/'; then
+              echo "::error::$f depends on a non-system DLL"
+              ldd "$f"
+              exit 1
+            fi
+          done
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
