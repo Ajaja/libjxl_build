@@ -1,0 +1,69 @@
+name: Build libjxl (MSYS2 CLANG64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "libjxl git ref (tag/branch/commit) to build; leave empty for default branch"
+        required: false
+        default: ""
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - name: Setup MSYS2 (CLANG64 environment)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANG64
+          update: true
+          install: >-
+            git
+            make
+            mingw-w64-clang-x86_64-clang
+            mingw-w64-clang-x86_64-cmake
+
+      - name: Clone libjxl
+        run: |
+          set -e
+          REF="${{ github.event.inputs.ref }}"
+          git clone --recursive https://github.com/libjxl/libjxl.git libjxl
+          cd libjxl
+          if [ -n "$REF" ]; then
+            git checkout "$REF"
+          fi
+
+      - name: Extract version info
+        id: version
+        run: |
+          set -e
+          cd libjxl
+          # Prefer an actual tag if one points at HEAD, otherwise fall back to
+          # short commit hash so every build still gets a unique, sortable name.
+          TAG="$(git describe --tags --exact-match 2>/dev/null || true)"
+          if [ -z "$TAG" ]; then
+            TAG="$(git describe --tags --always 2>/dev/null || git rev-parse --short HEAD)"
+          fi
+          echo "version=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Resolved libjxl version: ${TAG}"
+
+      - name: Configure and build
+        run: |
+          set -e
+          cd libjxl
+          mkdir -p build
+          cd build
+          cmake .. -G "MSYS Makefiles" -DCMAKE_BUILD_TYPE=Release -DJPEGXL_ENABLE_MANPAGES=OFF -DJPEGXL_ENABLE_DOXYGEN=OFF -DJPEGXL_STATIC=ON -DJPEGXL_BUNDLE_LIBPNG=OFF -DJPEGXL_ENABLE_BENCHMARK=OFF -DJPEGXL_ENABLE_OPENEXR=OFF -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=OFF -DJPEGXL_ENABLE_SJPEG=OFF -DCMAKE_CXX_FLAGS="-static -O3"
+          make -j$(nproc)
+          strip --strip-all build/tools/*.exe
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libjxl-${{ steps.version.outputs.version }}-clang64
+          path: libjxl/build/tools/*.exe
+          if-no-files-found: error
