@@ -54,6 +54,10 @@ jobs:
       - name: Configure and build
         run: |
           set -e
+          export CFLAGS="-O3"
+          export CXXFLAGS=$CFLAGS
+          export CPPFLAGS=$CFLAGS
+          export LDFLAGS="-static"
           cd libjxl
           mkdir -p build
           cd build
